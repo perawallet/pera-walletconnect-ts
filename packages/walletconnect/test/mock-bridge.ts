@@ -72,10 +72,25 @@ export class MockBridge {
     return `http://localhost:${port}`;
   }
 
-  async close(): Promise<void> {
+  /** Forcibly drop every client connection (simulates a bridge restart). */
+  terminateAll(): void {
     for (const client of this.wss.clients) {
       client.terminate();
     }
+  }
+
+  /** Send an arbitrary pub frame to the current subscribers of a topic. */
+  injectFrame(topic: string, payload: string): void {
+    const frame = JSON.stringify({ topic, type: "pub", payload, silent: true });
+    for (const sub of this.subs.get(topic) ?? []) {
+      if (sub.readyState === WebSocket.OPEN) {
+        sub.send(frame);
+      }
+    }
+  }
+
+  async close(): Promise<void> {
+    this.terminateAll();
     await new Promise<void>((resolve, reject) =>
       this.wss.close(err => (err ? reject(err) : resolve())),
     );

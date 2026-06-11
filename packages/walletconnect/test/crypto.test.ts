@@ -101,4 +101,19 @@ describe("decrypt hardening", () => {
   it("generateKey rejects non-multiple-of-8 bit lengths", async () => {
     await expect(generateKey(100)).rejects.toThrowError(RangeError);
   });
+
+  it("verifyHmac rejects an hmac of the wrong length", async () => {
+    const key = hexToArray(TEST_KEY);
+    const truncated = {
+      ...TEST_ENCRYPTION_PAYLOAD,
+      hmac: TEST_ENCRYPTION_PAYLOAD.hmac.slice(0, 32),
+    };
+    expect(await verifyHmac(truncated, key)).toBe(false);
+  });
+
+  it("decrypt throws on an empty key (caller error, not wire data)", async () => {
+    await expect(decrypt(TEST_ENCRYPTION_PAYLOAD, new ArrayBuffer(0))).rejects.toThrowError(
+      /Missing key/,
+    );
+  });
 });
