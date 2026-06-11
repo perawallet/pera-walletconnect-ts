@@ -1,0 +1,14 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noEmit": true,
+    "paths": {
+      "@perawallet/walletconnect": ["../../dist/index.d.ts"],
+      "@perawallet/walletconnect/types": ["../../dist/types/index.d.ts"]
+    }
+  },
+  "include": ["surface.ts"]
+}

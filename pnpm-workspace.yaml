@@ -1,0 +1,5 @@
+packages:
+  - packages/walletconnect
+
+# Supply-chain hardening: dependencies must be published for at least 7 days
+minimumReleaseAge: 10080
