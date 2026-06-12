@@ -3,3 +3,10 @@ packages:
 
 # Supply-chain hardening: dependencies must be published for at least 7 days
 minimumReleaseAge: 10080
+
+# Patch known CVEs in transitive deps of the legacy @walletconnect/client@1.8.0
+# (dev-only, used as the interop-test reference). socket-transport pins ws to
+# exactly 7.5.3, so a lockfile bump alone can't reach the patched releases.
+overrides:
+  ws@7.5.3: ^7.5.10 # GHSA-3h5v-q93c-6h6q (DoS via many HTTP headers)
+  bn.js@<4.12.3: ^4.12.3 # GHSA-378v-28hj-76wf (infinite loop)
