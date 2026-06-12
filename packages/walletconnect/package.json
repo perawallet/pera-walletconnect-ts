@@ -7,9 +7,6 @@
     "type": "git",
     "url": "git+https://github.com/perawallet/pera-walletconnect-ts.git"
   },
-  "publishConfig": {
-    "access": "public"
-  },
   "files": [
     "dist",
     "NOTICE"
@@ -41,6 +38,9 @@
       }
     },
     "./package.json": "./package.json"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "build": "vite build && node scripts/fix-dts.cjs",
