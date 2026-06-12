@@ -4,15 +4,12 @@ name: CodeQL
 # Catches classes of bugs that linters don't (taint tracking, XSS
 # sources-to-sinks, prototype pollution, unsafe deserialization, etc.).
 
+# Code scanning requires GitHub Advanced Security on private repos, which this
+# repo doesn't have yet, so automatic runs always fail. Manual trigger only
+# until the repo goes public — then restore:
+#   push/pull_request on [main, v1] and a weekly cron ("0 8 * * 1").
 on:
-  push:
-    branches: [main, v1]
-  pull_request:
-    branches: [main, v1]
-  schedule:
-    # Weekly full scan regardless of churn — CodeQL's database grows with
-    # new queries, so a dormant file can start flagging months later.
-    - cron: "0 8 * * 1"
+  workflow_dispatch:
 
 permissions:
   contents: read
