@@ -7,6 +7,9 @@
     "type": "git",
     "url": "git+https://github.com/perawallet/pera-walletconnect-ts.git"
   },
+  "publishConfig": {
+    "access": "public"
+  },
   "files": [
     "dist",
     "NOTICE"
