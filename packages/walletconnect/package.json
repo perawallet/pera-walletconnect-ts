@@ -39,6 +39,9 @@
     },
     "./package.json": "./package.json"
   },
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "vite build && node scripts/fix-dts.cjs",
     "test": "vitest run",
