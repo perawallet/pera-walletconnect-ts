@@ -82,4 +82,91 @@ describe("SocketTransport reconnect", () => {
       payload: "after-restart",
     });
   }, 15_000);
+
+  it("re-subscribes dynamically subscribed topics after a reconnect", async () => {
+    // The wallet's handshake-topic subscription goes through subscribe(),
+    // not the constructor — it must survive a bridge drop just the same.
+    const subscriber = makeTransport(["client-topic"]);
+    const received: unknown[] = [];
+    subscriber.on("message", msg => received.push(msg));
+    subscriber.open();
+    subscriber.subscribe("handshake-topic");
+
+    await waitFor(() =>
+      bridge.messages.some(m => m.type === "sub" && m.topic === "handshake-topic")
+        ? true
+        : undefined,
+    );
+    const clientSubsBefore = bridge.messages.filter(
+      m => m.type === "sub" && m.topic === "client-topic",
+    ).length;
+
+    bridge.terminateAll();
+
+    // reconnect completes once the constructor topic re-subscribes…
+    await waitFor(
+      () =>
+        bridge.messages.filter(m => m.type === "sub" && m.topic === "client-topic").length >
+        clientSubsBefore
+          ? true
+          : undefined,
+      8000,
+    );
+
+    // …and the dynamic topic must come back with it
+    await waitFor(
+      () =>
+        bridge.messages.filter(m => m.type === "sub" && m.topic === "handshake-topic").length > 1
+          ? true
+          : undefined,
+      8000,
+    );
+
+    // end-to-end: a message published to the dynamic topic after the drop
+    // (cached by the bridge until someone subscribes) is delivered
+    const publisher = makeTransport([]);
+    publisher.open();
+    publisher.send("late-session-request", "handshake-topic", true);
+    const msg = await waitFor(
+      () =>
+        received.find(m => (m as { topic?: string; type?: string }).topic === "handshake-topic"),
+      8000,
+    );
+    expect(msg).toMatchObject({
+      topic: "handshake-topic",
+      type: "pub",
+      payload: "late-session-request",
+    });
+  }, 20_000);
+
+  it("emits open on connect, close on socket death, and open again on reconnect", async () => {
+    // The connector forwards these as transport_open / transport_close;
+    // consumers (the wallet) rely on them to observe socket health.
+    const transport = makeTransport(["some-topic"]);
+    const events: string[] = [];
+    transport.on("open", () => events.push("open"));
+    transport.on("close", () => events.push("close"));
+    transport.open();
+
+    await waitFor(() => (events.includes("open") ? true : undefined));
+
+    bridge.terminateAll();
+    await waitFor(() => (events.includes("close") ? true : undefined), 8000);
+
+    // the 1s auto-reconnect produces a second open
+    await waitFor(() => (events.filter(e => e === "open").length > 1 ? true : undefined), 8000);
+    expect(events.slice(0, 3)).toEqual(["open", "close", "open"]);
+  }, 20_000);
+
+  it("emits close on a user-initiated close", async () => {
+    const transport = makeTransport([]);
+    const events: string[] = [];
+    transport.on("close", () => events.push("close"));
+    transport.open();
+
+    await waitFor(() => (transport.connected ? true : undefined));
+    transport.close();
+
+    expect(events).toEqual(["close"]);
+  });
 });

@@ -23,6 +23,8 @@ function getWebSocketClass(): typeof WebSocket {
 
 // -- SocketTransport ------------------------------------------------------ //
 
+const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
+
 class SocketTransport implements ITransportLib {
   private _protocol: string;
   private _version: number;
@@ -33,6 +35,7 @@ class SocketTransport implements ITransportLib {
   private _queue: ISocketMessage[] = [];
   private _events: ITransportEvent[] = [];
   private _subscriptions: string[] = [];
+  private _connectTimeout: number;
 
   // -- constructor ----------------------------------------------------- //
 
@@ -44,6 +47,7 @@ class SocketTransport implements ITransportLib {
     this._socket = null;
     this._nextSocket = null;
     this._subscriptions = opts.subscriptions || [];
+    this._connectTimeout = opts.connectTimeout ?? DEFAULT_CONNECT_TIMEOUT_MS;
     this._netMonitor = opts.netMonitor || new NetworkMonitor();
 
     if (!opts.url || typeof opts.url !== "string") {
@@ -119,6 +123,13 @@ class SocketTransport implements ITransportLib {
   }
 
   public subscribe(topic: string) {
+    // Track the topic so a reconnect re-subscribes it; a one-shot sub frame
+    // would leave the topic deaf after any socket drop (the wallet's
+    // handshake topic arrives through here, not the constructor).
+    if (!this._subscriptions.includes(topic)) {
+      this._subscriptions.push(topic);
+    }
+
     this._socketSend({
       topic: topic,
       type: "sub",
@@ -147,13 +158,48 @@ class SocketTransport implements ITransportLib {
       throw new Error("Failed to create socket");
     }
 
-    this._nextSocket.onmessage = (event: MessageEvent) => this._socketReceive(event);
+    const socket = this._nextSocket;
 
-    this._nextSocket.onopen = () => this._socketOpen();
+    // A handshake the platform silently gave up on (no open/error/close —
+    // e.g. the OS suspended the app mid-connect) would occupy _nextSocket
+    // forever and wedge every future _socketCreate. Force-fail it ourselves:
+    // detach the handlers first so a late platform close can't double-run
+    // the retry path.
+    const connectTimer = setTimeout(() => {
+      if (this._nextSocket !== socket) {
+        return;
+      }
+      socket.onopen = () => {
+        // abandoned attempt
+      };
+      socket.onclose = () => {
+        // abandoned attempt
+      };
+      try {
+        socket.close();
+      } catch (_error) {
+        // closing a CONNECTING socket is best-effort on some platforms
+      }
+      this._nextSocket = null;
+      this._socketCreate();
+    }, this._connectTimeout);
 
-    this._nextSocket.onerror = (event: Event) => this._socketError(event);
+    socket.onmessage = (event: MessageEvent) => this._socketReceive(event);
 
-    this._nextSocket.onclose = () => {
+    socket.onopen = () => {
+      clearTimeout(connectTimer);
+      this._socketOpen();
+    };
+
+    socket.onerror = (event: Event) => this._socketError(event);
+
+    socket.onclose = () => {
+      clearTimeout(connectTimer);
+      // An unexpected close of the PROMOTED socket is a transport-level
+      // close; a _nextSocket close is just a failed connection attempt.
+      if (this._socket === socket) {
+        this._dispatchEvent("close");
+      }
       setTimeout(() => {
         this._nextSocket = null;
         this._socketCreate();
@@ -162,19 +208,25 @@ class SocketTransport implements ITransportLib {
   }
 
   private _socketOpen() {
-    this._socketClose();
+    // Silent replacement: swapping a stale socket for the fresh one is not a
+    // transport-level close, so no "close" event fires here.
+    this._socketClose(true);
     this._socket = this._nextSocket;
     this._nextSocket = null;
     this._queueSubscriptions();
     this._pushQueue();
+    this._dispatchEvent("open");
   }
 
-  private _socketClose() {
+  private _socketClose(silent = false) {
     if (this._socket) {
       this._socket.onclose = () => {
         // empty
       };
       this._socket.close();
+      if (!silent) {
+        this._dispatchEvent("close");
+      }
     }
   }
 
@@ -205,25 +257,32 @@ class SocketTransport implements ITransportLib {
       silent: true,
     });
 
-    if (this._socket && this._socket.readyState === 1) {
-      const events = this._events.filter(event => event.event === "message");
-      if (events && events.length) {
-        events.forEach(event => event.callback(socketMessage));
-      }
+    // Dispatch unconditionally: this frame was already acked, and the bridge
+    // deletes cached messages at flush time — gating on the CURRENT socket
+    // state (which may have died since receipt) would drop it forever.
+    const events = this._events.filter(event => event.event === "message");
+    if (events && events.length) {
+      events.forEach(event => event.callback(socketMessage));
     }
   }
 
   private _socketError(e: Event) {
-    const events = this._events.filter(event => event.event === "error");
+    this._dispatchEvent("error", e);
+  }
+
+  // oxlint-disable-next-line typescript/no-explicit-any -- legacy transport event API is untyped
+  private _dispatchEvent(name: string, payload?: any) {
+    const events = this._events.filter(event => event.event === name);
     if (events && events.length) {
-      events.forEach(event => event.callback(e));
+      events.forEach(event => event.callback(payload));
     }
   }
 
   private _queueSubscriptions() {
-    const subscriptions = this._subscriptions;
-
-    subscriptions.forEach((topic: string) =>
+    // Every tracked topic — constructor-provided and dynamically subscribed —
+    // is re-queued on each (re)open. No reset: dropping back to
+    // opts.subscriptions here is what used to lose dynamic topics.
+    this._subscriptions.forEach((topic: string) =>
       this._queue.push({
         topic: topic,
         type: "sub",
@@ -231,8 +290,6 @@ class SocketTransport implements ITransportLib {
         silent: true,
       }),
     );
-
-    this._subscriptions = this.opts.subscriptions || [];
   }
 
   private _setToQueue(socketMessage: ISocketMessage) {
@@ -240,11 +297,13 @@ class SocketTransport implements ITransportLib {
   }
 
   private _pushQueue() {
+    // Swap the queue out before draining: a send that fails mid-flush
+    // re-queues its frame via _setToQueue, and that frame must land in the
+    // fresh queue — clearing after the loop would wipe it.
     const queue = this._queue;
+    this._queue = [];
 
     queue.forEach((socketMessage: ISocketMessage) => this._socketSend(socketMessage));
-
-    this._queue = [];
   }
 }
 
