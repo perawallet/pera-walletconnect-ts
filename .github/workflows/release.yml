@@ -34,7 +34,9 @@ jobs:
         run: pnpm typecheck && pnpm test && pnpm build && pnpm -C packages/walletconnect exec publint
       - name: Update npm for OIDC support
         run: npm install -g npm@latest && npm --version # OIDC trusted publishing requires npm >= 11.5.1
-      - name: Publish with provenance (OIDC, no token)
+      # No --provenance: npm only accepts provenance from public source repos.
+      # Re-add the flag if/when this repository goes public.
+      - name: Publish (OIDC trusted publishing, no token)
         working-directory: packages/walletconnect
         run: |
           VERSION=$(node -p "require('./package.json').version")
@@ -43,7 +45,7 @@ jobs:
             # so they don't land on the "latest" dist-tag (1.0.1-beta.0 -> beta)
             PRERELEASE_ID="${VERSION#*-}"
             DIST_TAG="${PRERELEASE_ID%%.*}"
-            npm publish --provenance --access public --tag "$DIST_TAG"
+            npm publish --access public --tag "$DIST_TAG"
           else
-            npm publish --provenance --access public
+            npm publish --access public
           fi
