@@ -104,6 +104,12 @@ export interface ISocketTransportOptions {
   url: string;
   netMonitor?: INetworkMonitor;
   subscriptions?: string[];
+  /**
+   * How long (ms) a socket may sit in CONNECTING before the attempt is
+   * abandoned and retried. Guards against handshakes that never resolve
+   * (e.g. the OS suspended the app mid-connect). Default: 10000.
+   */
+  connectTimeout?: number;
 }
 
 export interface ISessionStatus {
