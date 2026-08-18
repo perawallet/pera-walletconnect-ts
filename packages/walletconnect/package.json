@@ -1,6 +1,6 @@
 {
   "name": "@perawallet/walletconnect",
-  "version": "1.0.1",
+  "version": "1.0.2-beta.0",
   "description": "Modern, security-forward WalletConnect v1 client maintained by Pera Wallet",
   "license": "Apache-2.0",
   "repository": {

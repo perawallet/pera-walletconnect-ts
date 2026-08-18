@@ -139,6 +139,49 @@ describe("SocketTransport reconnect", () => {
     });
   }, 20_000);
 
+  it("sends exactly one sub frame per topic on first connect", async () => {
+    // subscribe() during CONNECTING queues a sub frame, and the open handler
+    // re-queues every tracked topic — without dedupe the handshake topic goes
+    // out twice, and the bridge replays its pending history once per frame.
+    const subscriber = makeTransport(["client-topic"]);
+    subscriber.open();
+    subscriber.subscribe("handshake-topic");
+
+    await waitFor(() =>
+      bridge.messages.some(m => m.type === "sub" && m.topic === "handshake-topic")
+        ? true
+        : undefined,
+    );
+    // let any duplicate frame land before counting
+    await new Promise(resolve => setTimeout(resolve, 250));
+
+    const subFrames = (topic: string) =>
+      bridge.messages.filter(m => m.type === "sub" && m.topic === topic).length;
+    expect(subFrames("handshake-topic")).toBe(1);
+    expect(subFrames("client-topic")).toBe(1);
+  });
+
+  it("delivers a bridge-cached message exactly once to a topic subscribed during CONNECTING", async () => {
+    // The wallet-facing symptom of duplicate sub frames: the dApp's cached
+    // session_request replayed once per frame, so the wallet saw the same
+    // payload id twice.
+    const publisher = makeTransport([]);
+    publisher.open();
+    publisher.send("session-request", "handshake-topic", true);
+    await waitFor(() => (bridge.messages.some(m => m.type === "pub") ? true : undefined));
+
+    const subscriber = makeTransport(["client-topic"]);
+    const received: unknown[] = [];
+    subscriber.on("message", msg => received.push(msg));
+    subscriber.open();
+    subscriber.subscribe("handshake-topic");
+
+    await waitFor(() => (received.length > 0 ? true : undefined));
+    await new Promise(resolve => setTimeout(resolve, 250));
+
+    expect(received.length).toBe(1);
+  });
+
   it("emits open on connect, close on socket death, and open again on reconnect", async () => {
     // The connector forwards these as transport_open / transport_close;
     // consumers (the wallet) rely on them to observe socket health.
