@@ -126,9 +126,14 @@ class SocketTransport implements ITransportLib {
     // Track the topic so a reconnect re-subscribes it; a one-shot sub frame
     // would leave the topic deaf after any socket drop (the wallet's
     // handshake topic arrives through here, not the constructor).
-    if (!this._subscriptions.includes(topic)) {
-      this._subscriptions.push(topic);
+    // Already-tracked topics send nothing: the bridge replays a topic's
+    // whole pending history on EVERY sub frame it receives, so a repeat
+    // frame means duplicate message delivery — and reconnect re-subscription
+    // is _queueSubscriptions' job, not this one's.
+    if (this._subscriptions.includes(topic)) {
+      return;
     }
+    this._subscriptions.push(topic);
 
     this._socketSend({
       topic: topic,
@@ -283,7 +288,7 @@ class SocketTransport implements ITransportLib {
     // is re-queued on each (re)open. No reset: dropping back to
     // opts.subscriptions here is what used to lose dynamic topics.
     this._subscriptions.forEach((topic: string) =>
-      this._queue.push({
+      this._setToQueue({
         topic: topic,
         type: "sub",
         payload: "",
@@ -293,6 +298,15 @@ class SocketTransport implements ITransportLib {
   }
 
   private _setToQueue(socketMessage: ISocketMessage) {
+    // One sub frame per topic per flush: a subscribe() issued while the
+    // socket was CONNECTING already queued this topic, and the bridge
+    // replays the topic's pending history once per frame it receives.
+    if (
+      socketMessage.type === "sub" &&
+      this._queue.some(queued => queued.type === "sub" && queued.topic === socketMessage.topic)
+    ) {
+      return;
+    }
     this._queue.push(socketMessage);
   }
 

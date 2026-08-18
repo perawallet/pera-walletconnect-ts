@@ -32,11 +32,16 @@ export class MockBridge {
             this.subs.set(message.topic, topicSubs);
           }
           topicSubs.add(socket);
+          // Mirrors pera-wc-bridge: EVERY sub frame replays the topic's
+          // pending history, and the history survives until an ack (or TTL)
+          // — so a duplicate sub frame means duplicate delivery.
           const pending = this.cache.get(message.topic) ?? [];
-          this.cache.delete(message.topic);
           for (const cached of pending) {
             socket.send(JSON.stringify(cached));
           }
+        } else if (message.type === "ack") {
+          // pera-wc-bridge clears the pending history on ack.
+          this.cache.delete(message.topic);
         } else if (message.type === "pub") {
           const topicSubs = [...(this.subs.get(message.topic) ?? [])].filter(
             s => s.readyState === WebSocket.OPEN && s !== socket,
@@ -51,7 +56,6 @@ export class MockBridge {
             this.cache.set(message.topic, pending);
           }
         }
-        // "ack" intentionally ignored
       });
       socket.on("close", () => {
         for (const topicSubs of this.subs.values()) {
