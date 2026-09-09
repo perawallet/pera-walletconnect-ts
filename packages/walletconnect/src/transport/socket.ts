@@ -24,7 +24,7 @@ function getWebSocketClass(): typeof WebSocket {
 // -- SocketTransport ------------------------------------------------------ //
 
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
-const BASE_RECONNECT_DELAY_MS = 1_000;
+const BASE_RECONNECT_DELAY_MS = 1000;
 const MAX_RECONNECT_DELAY_MS = 30_000;
 
 class SocketTransport implements ITransportLib {
