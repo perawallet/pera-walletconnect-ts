@@ -24,6 +24,8 @@ function getWebSocketClass(): typeof WebSocket {
 // -- SocketTransport ------------------------------------------------------ //
 
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
+const BASE_RECONNECT_DELAY_MS = 1000;
+const MAX_RECONNECT_DELAY_MS = 30_000;
 
 class SocketTransport implements ITransportLib {
   private _protocol: string;
@@ -36,6 +38,8 @@ class SocketTransport implements ITransportLib {
   private _events: ITransportEvent[] = [];
   private _subscriptions: string[] = [];
   private _connectTimeout: number;
+  private _closed = false;
+  private _reconnectAttempts = 0;
 
   // -- constructor ----------------------------------------------------- //
 
@@ -102,10 +106,36 @@ class SocketTransport implements ITransportLib {
   // -- public ---------------------------------------------------------- //
 
   public open() {
+    this._closed = false;
     this._socketCreate();
   }
 
   public close() {
+    // Stop the reconnect machinery, not just the promoted socket. A socket
+    // that never opened (still CONNECTING, or already scheduled to retry after
+    // a drop) has its connect-timeout and onclose retries armed; _socketClose
+    // only touches the promoted socket, so without the _closed flag those
+    // timers keep calling _socketCreate forever. That leaked an immortal
+    // reconnect loop every time a consumer tore down a failed connection —
+    // clearable only by killing the process.
+    this._closed = true;
+
+    // Detach and drop any in-flight (never-promoted) socket so neither its
+    // connect timeout nor its onclose handler can resurrect the transport.
+    if (this._nextSocket) {
+      const pending = this._nextSocket;
+      pending.onopen = null;
+      pending.onclose = null;
+      pending.onerror = null;
+      pending.onmessage = null;
+      this._nextSocket = null;
+      try {
+        pending.close();
+      } catch (_error) {
+        // closing a CONNECTING socket is best-effort on some platforms
+      }
+    }
+
     this._socketClose();
   }
 
@@ -151,7 +181,9 @@ class SocketTransport implements ITransportLib {
   // -- private ---------------------------------------------------------- //
 
   private _socketCreate() {
-    if (this._nextSocket) {
+    // Guards both retry paths (the connect timeout below and the onclose
+    // reconnect): once close() has run, nothing may build a new socket.
+    if (this._closed || this._nextSocket) {
       return;
     }
 
@@ -205,14 +237,22 @@ class SocketTransport implements ITransportLib {
       if (this._socket === socket) {
         this._dispatchEvent("close");
       }
+      // Exponential backoff so a dead bridge is not hammered once per second
+      // for the life of the app; reset on a successful open. The first retry
+      // stays at the historical ~1s.
+      const delay = Math.min(
+        BASE_RECONNECT_DELAY_MS * 2 ** this._reconnectAttempts++,
+        MAX_RECONNECT_DELAY_MS,
+      );
       setTimeout(() => {
         this._nextSocket = null;
         this._socketCreate();
-      }, 1000);
+      }, delay);
     };
   }
 
   private _socketOpen() {
+    this._reconnectAttempts = 0;
     // Silent replacement: swapping a stale socket for the fresh one is not a
     // transport-level close, so no "close" event fires here.
     this._socketClose(true);
