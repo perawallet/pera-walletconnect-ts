@@ -1,0 +1,66 @@
+version: 2
+
+# Weekly updates, grouped by risk so a week's bumps arrive as a few PRs; majors outside a named group still get their own.
+# The 7-day cooldown mirrors pnpm's minimumReleaseAge, so Dependabot skips versions the install gate would reject.
+# Security updates bypass it.
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Europe/London
+    open-pull-requests-limit: 10
+    cooldown:
+      default-days: 7
+    groups:
+      types:
+        patterns:
+          - "@types/*"
+      vite-vitest:
+        patterns:
+          - vite
+          - vite-plugin-*
+          - vitest
+          - "@vitest/*"
+      oxc:
+        patterns:
+          - oxlint
+          - oxlint-*
+          - oxfmt
+      prod-minor-patch:
+        dependency-type: production
+        update-types:
+          - minor
+          - patch
+      dev-minor-patch:
+        dependency-type: development
+        update-types:
+          - minor
+          - patch
+    ignore:
+      # @types/node tracks the Node runtime pinned in .tool-versions; a major ahead of it only types APIs CI doesn't have.
+      - dependency-name: "@types/node"
+        update-types: [version-update:semver-major]
+
+  # Actions are pinned by SHA; Dependabot rewrites the SHA and the trailing version comment.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Europe/London
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns:
+          - "*"
+    ignore:
+      # pnpm/action-setup v6 ignores the `version:` input and the `packageManager` field and installs pnpm 11, which
+      # rewrites pnpm 10 lockfiles. Stay on v5 until that is fixed.
+      - dependency-name: pnpm/action-setup
+        update-types: [version-update:semver-major]
