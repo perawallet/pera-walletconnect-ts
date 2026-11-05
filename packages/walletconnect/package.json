@@ -54,8 +54,8 @@
     "prepack": "pnpm build"
   },
   "dependencies": {
-    "@noble/ciphers": "^2.0.0",
-    "@noble/hashes": "^2.0.0"
+    "@noble/ciphers": "^2.4.0",
+    "@noble/hashes": "^2.4.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
