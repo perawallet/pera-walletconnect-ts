@@ -13,9 +13,11 @@ export class MockBridge {
   private subs = new Map<string, Set<WebSocket>>();
   private cache = new Map<string, BridgeMessage[]>();
   public messages: BridgeMessage[] = [];
+  private readonly gate: { refuse: boolean };
 
-  private constructor(wss: WebSocketServer) {
+  private constructor(wss: WebSocketServer, gate: { refuse: boolean }) {
     this.wss = wss;
+    this.gate = gate;
     wss.on("connection", socket => {
       socket.on("message", raw => {
         let message: BridgeMessage;
@@ -66,9 +68,13 @@ export class MockBridge {
   }
 
   static async start(): Promise<MockBridge> {
-    const wss = new WebSocketServer({ port: 0 });
+    const gate = { refuse: false };
+    const wss = new WebSocketServer({
+      port: 0,
+      verifyClient: (_info, done) => done(!gate.refuse, 503),
+    });
     await new Promise<void>(resolve => wss.on("listening", resolve));
-    return new MockBridge(wss);
+    return new MockBridge(wss, gate);
   }
 
   get url(): string {
@@ -81,6 +87,16 @@ export class MockBridge {
     for (const client of this.wss.clients) {
       client.terminate();
     }
+  }
+
+  /**
+   * Drop every client and refuse new ones while keeping the port. Unlike
+   * close(), the port can't be handed to another test file's bridge running
+   * in parallel, so a connect attempt here always fails.
+   */
+  refuseConnections(): void {
+    this.gate.refuse = true;
+    this.terminateAll();
   }
 
   /** Send an arbitrary pub frame to the current subscribers of a topic. */
