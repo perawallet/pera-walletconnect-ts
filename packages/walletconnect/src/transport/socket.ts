@@ -297,6 +297,11 @@ class SocketTransport implements ITransportLib {
     if (this._closed || this._closing) {
       return;
     }
+    // Still connected (e.g. wifi to cellular): a new socket would resend every
+    // sub frame, and the bridge replays a topic's pending history per sub.
+    if (this._socket?.readyState === 1) {
+      return;
+    }
     // The network is back, so the backoff earned while it was down no longer
     // says anything about the bridge. Waiting it out (up to 30s) would hold
     // every queued send back that long.

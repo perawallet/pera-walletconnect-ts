@@ -107,6 +107,7 @@ class Connector implements IConnector {
   private _sessionStorage: ISessionStorage | undefined;
   private _sendsInFlight = new Set<Promise<void>>();
   private _pendingCallRequests = new Set<(error: Error) => void>();
+  private _sessionEnds = 0;
   private _closeRequests = 0;
 
   // -- qrcodeModal ----------------------------------------------------- //
@@ -410,13 +411,24 @@ class Connector implements IConnector {
       throw new Error(ERROR_QRCODE_MODAL_USER_CLOSED);
     });
 
+    // The answer arrives on response:<id>, not as a session response, so the
+    // connector is usually not connected here and that can't tell whether the
+    // session is over. Count the ends instead: one during the request (it is
+    // what rejects the pending call) leaves nothing to end, and ending again
+    // would run the disconnect twice.
+    const sessionEndsBefore = this._sessionEnds;
     const endInstantRequest = () => {
-      // A session that already ended has no peer left to tell, and ending it
-      // again would run the disconnect a second time.
-      if (!this._connected) {
+      if (this._sessionEnds !== sessionEndsBefore) {
         return;
       }
-      this.killSession();
+      if (this._peerId) {
+        this.killSession();
+        return;
+      }
+      // No peer topic to send wc_sessionUpdate to (killSession would throw on
+      // the empty topic), so only end it here: close the modal, fire
+      // disconnect and close the transport.
+      this._handleSessionDisconnect();
     };
 
     try {
@@ -928,6 +940,7 @@ class Connector implements IConnector {
 
   private _handleSessionDisconnect(errorMsg?: string) {
     const message = errorMsg || "Session Disconnected";
+    this._sessionEnds++;
     if (!this._connected) {
       if (this._qrcodeModal) {
         this._qrcodeModal.close();

@@ -789,6 +789,60 @@ describe("pending call requests when the session ends", () => {
   });
 });
 
+describe("instant requests", () => {
+  let bridge: MockBridge;
+  let dapp: WalletConnect;
+
+  beforeEach(async () => {
+    bridge = await MockBridge.start();
+    dapp = new WalletConnect({ bridge: bridge.url, clientMeta: CLIENT_META });
+  });
+  afterEach(async () => {
+    dapp.transportClose();
+    await bridge.close();
+  });
+
+  // The answer arrives on response:<id>, never through a session response,
+  // so the connector has no peer when the request ends.
+  async function answerInstantRequest(answer: { result: unknown } | { error: unknown }) {
+    // As upstream, the request itself goes to the peer topic, which is empty
+    // before pairing, so the transport rejects it. That is out of scope here;
+    // the answer is injected below.
+    vi.spyOn(transportOf(dapp), "send").mockImplementation(() => {});
+    const requestSent = nextEvent(dapp, "call_request_sent");
+    const instantRequest = dapp.createInstantRequest({ method: "algo_signTxn", params: [[]] });
+    await requestSent;
+    const disconnects = vi.fn();
+    dapp.on("disconnect", disconnects);
+    const transportClose = vi.spyOn(dapp, "transportClose");
+    // oxlint-disable-next-line typescript/no-explicit-any -- the wallet's answer is injected past the transport
+    (dapp as any)._eventManager.trigger({ id: dapp.handshakeId, jsonrpc: "2.0", ...answer });
+    return { instantRequest, disconnects, transportClose };
+  }
+
+  it("ends the session once the wallet answers", async () => {
+    const { instantRequest, disconnects, transportClose } = await answerInstantRequest({
+      result: "signed",
+    });
+
+    await expect(within(instantRequest)).resolves.toBe("signed");
+    await vi.waitFor(() => expect(disconnects).toHaveBeenCalledTimes(1));
+    expect(transportClose).toHaveBeenCalled();
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(disconnects).toHaveBeenCalledTimes(1);
+  });
+
+  it("ends the session once the wallet rejects", async () => {
+    const { instantRequest, disconnects, transportClose } = await answerInstantRequest({
+      error: { code: 4001, message: "User rejected" },
+    });
+
+    await expect(within(instantRequest)).rejects.toBeDefined();
+    await vi.waitFor(() => expect(disconnects).toHaveBeenCalledTimes(1));
+    expect(transportClose).toHaveBeenCalled();
+  });
+});
+
 describe("frames that cannot be delivered after the session ends", () => {
   it("reports them as transport_undelivered, never as transport_error", async () => {
     const bridge = await MockBridge.start();

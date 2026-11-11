@@ -413,6 +413,25 @@ describe("SocketTransport online event", () => {
 
     expect(FakeWebSocket.instances).toHaveLength(5);
   });
+
+  it("keeps an open socket when the network changes", () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+
+    const { transport, netMonitor } = makeMonitoredTransport();
+    transport.open();
+    instance(0).accept();
+    expect(transport.connected).toBe(true);
+
+    // e.g. wifi to cellular while the socket stays up: a new socket would
+    // resend every sub frame, and the bridge replays pending history per sub.
+    netMonitor.trigger("online");
+    vi.advanceTimersByTime(60_000);
+
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(instance(0).readyState).toBe(1);
+    transport.close();
+  });
 });
 
 describe("SocketTransport close with frames still to send", () => {

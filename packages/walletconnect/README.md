@@ -133,6 +133,12 @@ const signed = await connector.sendCustomRequest(
 await connector.killSession();
 ```
 
+> **Pending requests reject when the session ends.** Since 1.0.4,
+> `sendCustomRequest` and the other request methods reject with the disconnect
+> message when either side ends the session, instead of never settling. Always
+> `await` them or attach a `.catch`: a fire-and-forget call becomes an
+> unhandled rejection, which ends a Node process by default.
+
 > **Note on bridges:** the original public `*.bridge.walletconnect.org` servers
 > have been shut down by ReOwn. Wallet-side connections take the bridge from
 > the `wc:` URI automatically; dapp-side code should pass the URL of a bridge
