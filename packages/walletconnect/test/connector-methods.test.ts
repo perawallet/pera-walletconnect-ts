@@ -795,10 +795,7 @@ describe("frames that cannot be delivered after the session ends", () => {
     const { dapp, wallet } = await makePair(bridge);
     dapp.transportClose();
     const transport = transportOf(wallet);
-    // The bridge is gone for good. Refuse rather than close(): a freed port
-    // can be taken by a parallel test file's bridge, which would then accept
-    // the frames this test expects to be undelivered.
-    bridge.refuseConnections();
+    await bridge.close(); // the bridge is gone for good
     await vi.waitFor(() => expect(transport.connected).toBe(false));
 
     const transportErrors = vi.fn();
@@ -814,6 +811,5 @@ describe("frames that cannot be delivered after the session ends", () => {
     await new Promise(resolve => setTimeout(resolve, 1500));
     expect(transportErrors).not.toHaveBeenCalled();
     expect(onCallRequest).not.toHaveBeenCalled();
-    await bridge.close();
   }, 10_000);
 });

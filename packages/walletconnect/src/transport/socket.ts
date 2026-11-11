@@ -478,7 +478,10 @@ class SocketTransport implements ITransportLib {
     };
     const timer = setTimeout(() => finish(false), this._connectTimeout);
     socket.onmessage = null;
-    socket.onerror = null;
+    // Error as well as close: Node 22's built-in WebSocket fires only error
+    // when the connection fails and never closes, which would hold the frames
+    // until the connect timeout. Elsewhere close follows error anyway.
+    socket.onerror = () => finish(false);
     socket.onclose = () => finish(false);
     socket.onopen = () => {
       frames.forEach(frame => socket.send(JSON.stringify(frame)));
