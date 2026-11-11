@@ -105,6 +105,9 @@ class Connector implements IConnector {
   private _transport: ITransportLib;
   private _eventManager: EventManager = new EventManager();
   private _sessionStorage: ISessionStorage | undefined;
+  private _sendsInFlight = new Set<Promise<void>>();
+  private _pendingCallRequests = new Set<(error: Error) => void>();
+  private _closeRequests = 0;
 
   // -- qrcodeModal ----------------------------------------------------- //
 
@@ -408,6 +411,11 @@ class Connector implements IConnector {
     });
 
     const endInstantRequest = () => {
+      // A session that already ended has no peer left to tell, and ending it
+      // again would run the disconnect a second time.
+      if (!this._connected) {
+        return;
+      }
       this.killSession();
     };
 
@@ -713,7 +721,7 @@ class Connector implements IConnector {
       params: [{ request, options }],
     });
 
-    return new Promise((resolve, reject) => {
+    return this._awaitResponse((resolve, reject) => {
       this._subscribeToResponse(request.id, (error: Error | null, payload: any | null) => {
         if (error) {
           reject(error);
@@ -777,7 +785,25 @@ class Connector implements IConnector {
   }
 
   public transportClose() {
-    this._transport.close();
+    // A send started in the same tick (rejectSession() or approveRequest()
+    // followed by transportClose()) is still encrypting; closing now would
+    // drop its frame. Only the latest call may close: it waits for every send
+    // made before it, and an earlier one would cut off those that came after.
+    const request = ++this._closeRequests;
+    if (!this._sendsInFlight.size) {
+      this._transport.close();
+      return;
+    }
+    const settled = Promise.all([...this._sendsInFlight]);
+    if (this._transport instanceof SocketTransport) {
+      this._transport.closeAfter(settled);
+    } else {
+      settled.then(() => {
+        if (request === this._closeRequests) {
+          this._transport.close();
+        }
+      });
+    }
   }
 
   // -- private --------------------------------------------------------- //
@@ -786,28 +812,55 @@ class Connector implements IConnector {
     request: Partial<IJsonRpcRequest>,
     options?: Partial<IInternalRequestOptions>,
   ) {
-    const callRequest: IJsonRpcRequest = this._formatRequest(request);
+    const sent = this._beginSend();
+    try {
+      const callRequest: IJsonRpcRequest = this._formatRequest(request);
 
-    const encryptionPayload: IEncryptionPayload | null = await this._encrypt(callRequest);
+      const encryptionPayload: IEncryptionPayload | null = await this._encrypt(callRequest);
 
-    const topic: string = typeof options?.topic !== "undefined" ? options.topic : this.peerId;
-    const payload: string = JSON.stringify(encryptionPayload);
-    const silent =
-      typeof options?.forcePushNotification !== "undefined"
-        ? !options.forcePushNotification
-        : isSilentPayload(callRequest);
+      const topic: string = typeof options?.topic !== "undefined" ? options.topic : this.peerId;
+      const payload: string = JSON.stringify(encryptionPayload);
+      const silent =
+        typeof options?.forcePushNotification !== "undefined"
+          ? !options.forcePushNotification
+          : isSilentPayload(callRequest);
 
-    this._transport.send(payload, topic, silent);
+      this._transport.send(payload, topic, silent);
+    } finally {
+      sent();
+    }
   }
 
   protected async _sendResponse(response: IJsonRpcResponseSuccess | IJsonRpcResponseError) {
-    const encryptionPayload: IEncryptionPayload | null = await this._encrypt(response);
+    const sent = this._beginSend();
+    try {
+      const encryptionPayload: IEncryptionPayload | null = await this._encrypt(response);
 
-    const topic: string = this.peerId;
-    const payload: string = JSON.stringify(encryptionPayload);
-    const silent = true;
+      const topic: string = this.peerId;
+      const payload: string = JSON.stringify(encryptionPayload);
+      const silent = true;
 
-    this._transport.send(payload, topic, silent);
+      this._transport.send(payload, topic, silent);
+    } finally {
+      sent();
+    }
+  }
+
+  private _beginSend(): () => void {
+    // A marker that only ever resolves, so tracking a send neither handles
+    // nor adds a rejection: a failed send still reaches its caller, or
+    // surfaces as an unhandled rejection.
+    let markSent = () => {
+      // assigned by the Promise executor below
+    };
+    const marker = new Promise<void>(resolve => {
+      markSent = resolve;
+    });
+    this._sendsInFlight.add(marker);
+    return () => {
+      this._sendsInFlight.delete(marker);
+      markSent();
+    };
   }
 
   protected async _sendSessionRequest(
@@ -893,6 +946,12 @@ class Connector implements IConnector {
     if (this._peerId) {
       this._peerId = "";
     }
+    // The transport closes below, so no answer to these can arrive any more.
+    // Their response listeners stay registered: without one, a late response
+    // would fall through to the app's call_request listeners.
+    const pendingCallRequests = [...this._pendingCallRequests];
+    this._pendingCallRequests.clear();
+    pendingCallRequests.forEach(abort => abort(new Error(message)));
     this._eventManager.trigger({
       event: "disconnect",
       params: [{ message }],
@@ -1013,7 +1072,7 @@ class Connector implements IConnector {
   }
 
   private _subscribeToCallResponse(id: number): Promise<any> {
-    return new Promise((resolve, reject) => {
+    return this._awaitResponse((resolve, reject) => {
       this._subscribeToResponse(id, (error, payload) => {
         if (error) {
           reject(error);
@@ -1027,6 +1086,30 @@ class Connector implements IConnector {
           reject(new Error(ERROR_INVALID_RESPONSE));
         }
       });
+    });
+  }
+
+  /**
+   * A promise for a peer's answer that the end of the session rejects: once
+   * the transport closes, no answer can arrive, and the caller would
+   * otherwise wait forever.
+   */
+  private _awaitResponse<T>(
+    // oxlint-disable-next-line typescript/no-explicit-any -- JSON-RPC error objects are rejected as-is
+    subscribe: (resolve: (value: T) => void, reject: (reason: any) => void) => void,
+  ): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      // oxlint-disable-next-line typescript/no-explicit-any -- JSON-RPC error objects are rejected as-is
+      const abort = (reason: any) => {
+        this._pendingCallRequests.delete(abort);
+        reject(reason);
+      };
+      const settle = (value: T) => {
+        this._pendingCallRequests.delete(abort);
+        resolve(value);
+      };
+      this._pendingCallRequests.add(abort);
+      subscribe(settle, abort);
     });
   }
 
@@ -1110,6 +1193,13 @@ class Connector implements IConnector {
       this._eventManager.trigger({
         event: "transport_error",
         params: ["Websocket connection failed"],
+      }),
+    );
+
+    this._transport.on("undelivered", (frames: ISocketMessage[]) =>
+      this._eventManager.trigger({
+        event: "transport_undelivered",
+        params: [{ count: frames.length }],
       }),
     );
 
