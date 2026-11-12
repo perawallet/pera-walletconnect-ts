@@ -33,7 +33,9 @@ jobs:
       - name: Build and verify
         run: pnpm typecheck && pnpm test && pnpm build && pnpm -C packages/walletconnect exec publint
       - name: Update npm for OIDC support
-        run: npm install -g npm@latest && npm --version # OIDC trusted publishing requires npm >= 11.5.1
+        # OIDC trusted publishing needs npm >= 11.5.1. Pinned to 11, which published
+        # 1.0.3; move to a new major only after trying it on a prerelease.
+        run: npm install -g npm@11 && npm --version
       # No --provenance: npm only accepts provenance from public source repos.
       # Re-add the flag if/when this repository goes public.
       - name: Publish (OIDC trusted publishing, no token)
