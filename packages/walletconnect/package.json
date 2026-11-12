@@ -60,7 +60,7 @@
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/ws": "^8.5.0",
-    "@vitest/coverage-v8": "^4.0.0",
+    "@vitest/coverage-v8": "^5.0.5",
     "@walletconnect/client": "1.8.0",
     "@walletconnect/crypto": "1.0.3",
     "eslint-plugin-unused-imports": "4.4.1",
