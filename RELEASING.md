@@ -17,13 +17,15 @@
 
 ## One-time GitHub setup
 
-1. Settings → Environments → create `npm-publish`; add required reviewers
-   (release approvers).
+1. Settings → Environments → create `npm-publish` and add required reviewers
+   (release approvers). Without them, pushing a release tag publishes to npm
+   straight away, with no approval step.
 2. Branch protection on the default branch: require pre-merge checks.
 
 ## Each release
 
 1. Bump `version` in `packages/walletconnect/package.json` via PR.
 2. After merge: `git tag vX.Y.Z && git push origin vX.Y.Z`.
-3. Approve the `npm-publish` environment run when prompted.
+3. If `npm-publish` has required reviewers, approve its environment run when
+   prompted.
 4. Verify the provenance badge on https://www.npmjs.com/package/@perawallet/walletconnect.

@@ -9,6 +9,9 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import WalletConnect from "../src";
+import Connector from "../src/core/connector";
+import * as cryptoLib from "../src/crypto";
+import type { ITransportLib } from "../src/types";
 import { MockBridge } from "./mock-bridge";
 import {
   ERROR_SESSION_DISCONNECTED,
@@ -518,4 +521,349 @@ describe("_registerPushServer validation throws", () => {
         ),
     ).toThrow(/pushServerOpts\.token/);
   });
+});
+
+/** Rejects if `promise` has not settled within `ms`. */
+function within<T>(promise: Promise<T>, ms = 3000): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error(`not settled within ${ms}ms`)), ms),
+    ),
+  ]);
+}
+
+function deferredGate() {
+  let resolve: () => void = () => {
+    // replaced below
+  };
+  const promise = new Promise<void>(r => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
+// oxlint-disable-next-line typescript/no-explicit-any -- reaching the private transport to drop its socket
+function transportOf(connector: WalletConnect): any {
+  // oxlint-disable-next-line typescript/no-explicit-any -- reaching the private transport to drop its socket
+  return (connector as any)._transport;
+}
+
+describe("frames sent right before the transport closes", () => {
+  let bridge: MockBridge;
+  let dapp: WalletConnect;
+  let wallet: WalletConnect;
+
+  beforeEach(async () => {
+    bridge = await MockBridge.start();
+  });
+  afterEach(async () => {
+    dapp.transportClose();
+    wallet.transportClose();
+    await bridge.close();
+  });
+
+  it("delivers a session rejection when the wallet closes the transport in the same tick", async () => {
+    dapp = new WalletConnect({ bridge: bridge.url, clientMeta: CLIENT_META });
+    await dapp.createSession({ chainId: 1 });
+    wallet = new WalletConnect({ uri: dapp.uri, clientMeta: CLIENT_META });
+    await nextEvent(wallet, "session_request");
+    const disconnected = nextEvent(dapp, "disconnect");
+
+    wallet.rejectSession({ message: "user rejected" });
+    wallet.off("disconnect");
+    wallet.transportClose();
+
+    const payload = await within(disconnected);
+    expect(payload.params[0].message).toBe("user rejected");
+  });
+
+  it("delivers killSession while the wallet socket is down", async () => {
+    ({ dapp, wallet } = await makePair(bridge));
+    const transport = transportOf(wallet);
+    transport._socket.close();
+    await vi.waitFor(() => expect(transport.connected).toBe(false));
+    const disconnected = nextEvent(dapp, "disconnect");
+
+    await wallet.killSession();
+
+    await within(disconnected);
+    expect(dapp.connected).toBe(false);
+  });
+
+  it("delivers a send started between two transportClose() calls", async () => {
+    ({ dapp, wallet } = await makePair(bridge));
+    // oxlint-disable-next-line typescript/no-explicit-any -- legacy connector event API is untyped
+    const calls: any[] = [];
+    // oxlint-disable-next-line typescript/no-explicit-any -- legacy connector event API is untyped
+    wallet.on("call_request", (_error: Error | null, payload: any) => calls.push(payload));
+    const first = dapp.sendCustomRequest({ method: "algo_signTxn", params: [[]] });
+    const second = dapp.sendCustomRequest({ method: "algo_signTxn", params: [[]] });
+    await vi.waitFor(() => expect(calls).toHaveLength(2));
+    // Holds each encryption until the test lets it finish, so the first send
+    // completes while the second is still encrypting.
+    const gates = [deferredGate(), deferredGate()];
+    // oxlint-disable-next-line typescript/no-explicit-any -- gating the private encryption step
+    const walletInternals = wallet as any;
+    const encrypt = walletInternals._encrypt.bind(wallet);
+    let encryptions = 0;
+    vi.spyOn(walletInternals, "_encrypt").mockImplementation(async data => {
+      const gate = gates[encryptions++];
+      await gate?.promise;
+      return encrypt(data);
+    });
+
+    wallet.approveRequest({ id: calls[0].id, result: "first" });
+    wallet.transportClose();
+    wallet.approveRequest({ id: calls[1].id, result: "second" });
+    wallet.transportClose();
+    gates[0]?.resolve();
+    await expect(within(first)).resolves.toBe("first");
+    gates[1]?.resolve();
+
+    await expect(within(second)).resolves.toBe("second");
+  });
+
+  it("subscribes nothing from the socket that delivers the last frames", async () => {
+    ({ dapp, wallet } = await makePair(bridge));
+    const transport = transportOf(wallet);
+    transport._socket.close();
+    await vi.waitFor(() => expect(transport.connected).toBe(false));
+    const subsBefore = bridge.messages.filter(m => m.type === "sub").length;
+    const disconnected = nextEvent(dapp, "disconnect");
+
+    await wallet.killSession();
+    await within(disconnected);
+    await new Promise(resolve => setTimeout(resolve, 100));
+
+    expect(bridge.messages.filter(m => m.type === "sub")).toHaveLength(subsBefore);
+  });
+});
+
+describe("transportClose with a transport other than SocketTransport", () => {
+  class RecordingTransport implements ITransportLib {
+    sent: string[] = [];
+    closes = 0;
+    open() {
+      // nothing to open
+    }
+    close() {
+      this.closes++;
+    }
+    send(message: string) {
+      this.sent.push(message);
+    }
+    subscribe() {
+      // nothing to subscribe
+    }
+    on() {
+      // emits nothing
+    }
+  }
+
+  it("closes only after the sends made before the latest call", async () => {
+    const transport = new RecordingTransport();
+    const connector = new Connector({
+      cryptoLib,
+      connectorOpts: { bridge: "https://bridge.invalid", clientMeta: CLIENT_META },
+      transport,
+    });
+    const gates = [deferredGate(), deferredGate()];
+    // oxlint-disable-next-line typescript/no-explicit-any -- gating the private encryption step
+    const internals = connector as any;
+    const pendingGates = [...gates];
+    vi.spyOn(internals, "_encrypt").mockImplementation(async () => {
+      await pendingGates.shift()?.promise;
+      return null;
+    });
+
+    connector.approveRequest({ id: 1, jsonrpc: "2.0", result: "first" });
+    connector.transportClose();
+    connector.approveRequest({ id: 2, jsonrpc: "2.0", result: "second" });
+    connector.transportClose();
+    gates[0]?.resolve();
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    expect(transport.sent).toHaveLength(1);
+    expect(transport.closes).toBe(0);
+
+    gates[1]?.resolve();
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    expect(transport.sent).toHaveLength(2);
+    expect(transport.closes).toBe(1);
+  });
+});
+
+describe("pending call requests when the session ends", () => {
+  let bridge: MockBridge;
+  let dapp: WalletConnect;
+  let wallet: WalletConnect;
+
+  beforeEach(async () => {
+    bridge = await MockBridge.start();
+    ({ dapp, wallet } = await makePair(bridge));
+  });
+  afterEach(async () => {
+    dapp.transportClose();
+    wallet.transportClose();
+    await bridge.close();
+  });
+
+  it("rejects a pending request when the wallet ends the session", async () => {
+    const callRequest = nextEvent(wallet, "call_request");
+    const resultPromise = dapp.sendCustomRequest({ method: "algo_signTxn", params: [[]] });
+    await callRequest;
+
+    await wallet.killSession();
+
+    await expect(within(resultPromise)).rejects.toThrow("Session disconnected");
+  });
+
+  it("rejects a pending request when the dApp ends the session", async () => {
+    const callRequest = nextEvent(wallet, "call_request");
+    const resultPromise = dapp.sendCustomRequest({ method: "algo_signTxn", params: [[]] });
+    await callRequest;
+
+    await dapp.killSession({ message: "dApp disconnected" });
+
+    await expect(within(resultPromise)).rejects.toThrow("dApp disconnected");
+  });
+
+  it("does not route a late response to call_request listeners", async () => {
+    const callRequest = nextEvent(wallet, "call_request");
+    const resultPromise = dapp.sendCustomRequest({ method: "algo_signTxn", params: [[]] });
+    const call = await callRequest;
+    await dapp.killSession();
+    await expect(within(resultPromise)).rejects.toThrow("Session Disconnected");
+
+    const onCallRequest = vi.fn();
+    dapp.on("call_request", onCallRequest);
+    // oxlint-disable-next-line typescript/no-explicit-any -- the transport is closed, so the late response is injected past it
+    (dapp as any)._eventManager.trigger({ id: call.id, jsonrpc: "2.0", result: "late" });
+
+    expect(onCallRequest).not.toHaveBeenCalled();
+    await expect(resultPromise).rejects.toThrow("Session Disconnected");
+  });
+
+  it("rejects a pending unsafeSend when the session ends", async () => {
+    const callRequest = nextEvent(wallet, "call_request");
+    const resultPromise = dapp.unsafeSend({
+      id: Date.now(),
+      jsonrpc: "2.0",
+      method: "algo_signTxn",
+      params: [[]],
+    });
+    await callRequest;
+
+    await wallet.killSession();
+
+    await expect(within(resultPromise)).rejects.toThrow("Session disconnected");
+  });
+
+  it("does not end an instant request's session a second time once it is over", async () => {
+    // createInstantRequest generates a fresh key, so the wallet cannot read
+    // the request; the dApp's own record of sending it is what is awaited.
+    const requestSent = nextEvent(dapp, "call_request_sent");
+    const instantRequest = dapp.createInstantRequest({ method: "algo_signTxn", params: [[]] });
+    await requestSent;
+    const killSession = vi.spyOn(dapp, "killSession");
+
+    await dapp.killSession({ message: "dApp disconnected" });
+
+    await expect(within(instantRequest)).rejects.toThrow("dApp disconnected");
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(killSession).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a request that already settled out of the disconnect", async () => {
+    const callRequest = nextEvent(wallet, "call_request");
+    const resultPromise = dapp.sendCustomRequest({ method: "algo_signTxn", params: [[]] });
+    const call = await callRequest;
+    wallet.approveRequest({ id: call.id, result: "signed" });
+    await expect(resultPromise).resolves.toBe("signed");
+
+    await dapp.killSession();
+
+    await expect(resultPromise).resolves.toBe("signed");
+  });
+});
+
+describe("instant requests", () => {
+  let bridge: MockBridge;
+  let dapp: WalletConnect;
+
+  beforeEach(async () => {
+    bridge = await MockBridge.start();
+    dapp = new WalletConnect({ bridge: bridge.url, clientMeta: CLIENT_META });
+  });
+  afterEach(async () => {
+    dapp.transportClose();
+    await bridge.close();
+  });
+
+  // The answer arrives on response:<id>, never through a session response,
+  // so the connector has no peer when the request ends.
+  async function answerInstantRequest(answer: { result: unknown } | { error: unknown }) {
+    // As upstream, the request itself goes to the peer topic, which is empty
+    // before pairing, so the transport rejects it. That is out of scope here;
+    // the answer is injected below.
+    vi.spyOn(transportOf(dapp), "send").mockImplementation(() => {});
+    const requestSent = nextEvent(dapp, "call_request_sent");
+    const instantRequest = dapp.createInstantRequest({ method: "algo_signTxn", params: [[]] });
+    await requestSent;
+    const disconnects = vi.fn();
+    dapp.on("disconnect", disconnects);
+    const transportClose = vi.spyOn(dapp, "transportClose");
+    // oxlint-disable-next-line typescript/no-explicit-any -- the wallet's answer is injected past the transport
+    (dapp as any)._eventManager.trigger({ id: dapp.handshakeId, jsonrpc: "2.0", ...answer });
+    return { instantRequest, disconnects, transportClose };
+  }
+
+  it("ends the session once the wallet answers", async () => {
+    const { instantRequest, disconnects, transportClose } = await answerInstantRequest({
+      result: "signed",
+    });
+
+    await expect(within(instantRequest)).resolves.toBe("signed");
+    await vi.waitFor(() => expect(disconnects).toHaveBeenCalledTimes(1));
+    expect(transportClose).toHaveBeenCalled();
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(disconnects).toHaveBeenCalledTimes(1);
+  });
+
+  it("ends the session once the wallet rejects", async () => {
+    const { instantRequest, disconnects, transportClose } = await answerInstantRequest({
+      error: { code: 4001, message: "User rejected" },
+    });
+
+    await expect(within(instantRequest)).rejects.toBeDefined();
+    await vi.waitFor(() => expect(disconnects).toHaveBeenCalledTimes(1));
+    expect(transportClose).toHaveBeenCalled();
+  });
+});
+
+describe("frames that cannot be delivered after the session ends", () => {
+  it("reports them as transport_undelivered, never as transport_error", async () => {
+    const bridge = await MockBridge.start();
+    const { dapp, wallet } = await makePair(bridge);
+    dapp.transportClose();
+    const transport = transportOf(wallet);
+    await bridge.close(); // the bridge is gone for good
+    await vi.waitFor(() => expect(transport.connected).toBe(false));
+
+    const transportErrors = vi.fn();
+    const onCallRequest = vi.fn();
+    wallet.on("transport_error", transportErrors);
+    wallet.on("call_request", onCallRequest);
+    const undelivered = nextEvent(wallet, "transport_undelivered");
+
+    await wallet.killSession();
+
+    const payload = await within(undelivered, 5000);
+    expect(payload.params[0]).toEqual({ count: 1 });
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    expect(transportErrors).not.toHaveBeenCalled();
+    expect(onCallRequest).not.toHaveBeenCalled();
+  }, 10_000);
 });

@@ -9,6 +9,7 @@ export const reservedEvents = [
   "transport_open",
   "transport_close",
   "transport_error",
+  "transport_undelivered",
 ];
 
 export const signingMethods = [
