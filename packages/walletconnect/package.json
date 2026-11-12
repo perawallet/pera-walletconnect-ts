@@ -64,7 +64,7 @@
     "@walletconnect/client": "1.8.0",
     "@walletconnect/crypto": "1.0.3",
     "eslint-plugin-unused-imports": "4.4.1",
-    "oxfmt": "^0.45.0",
+    "oxfmt": "^0.75.0",
     "oxlint": "^1.0.0",
     "oxlint-tsgolint": "^7.0.2005",
     "publint": "^0.3.0",
